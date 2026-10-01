@@ -40,9 +40,10 @@ pipeline {
         }
         stage('4. Security Scan') {
             steps {
-                echo "===> [STAGE 4] Trivy Container Vulnerability Scan..."
+                echo "===> [STAGE 4] Trivy Container Vulnerability Scan & Audit..."
                 bat 'npm audit --audit-level=high || exit 0'
-                bat "docker run --rm -v //var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --severity HIGH,CRITICAL --format table ${APP_NAME}:${BUILD_TAG} > trivy-report.txt || exit 0"
+                bat "docker run --rm -v //var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --severity HIGH,CRITICAL --format table ${APP_NAME}:${BUILD_TAG}"
+                bat "docker run --rm -v //var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --severity CRITICAL --ignore-unfixed --exit-code 1 ${APP_NAME}:${BUILD_TAG}"
             }
         }
         stage('5. Deploy to Staging') {
@@ -57,21 +58,27 @@ pipeline {
         }
         stage('6. Release to Production') {
             steps {
-                echo "===> [STAGE 6] Promoting to Production on Port 5000 with Rollback..."
+                echo "===> [STAGE 6] Promoting to Production on Port 5000 with Real Rollback..."
                 script {
+                    def previous = ''
                     try {
-                        bat "docker tag ${APP_NAME}:latest ${APP_NAME}:backup || exit 0"
-                        bat "docker stop ${APP_NAME}-prod || exit 0"
-                        bat "docker rm ${APP_NAME}-prod || exit 0"
-                        bat "docker run -d --name ${APP_NAME}-prod -p ${PROD_PORT}:5000 ${APP_NAME}:${BUILD_TAG}"
+                        previous = bat(returnStdout: true, script: '@docker inspect --format "{{.Config.Image}}" simple-task-api-prod').trim()
+                        echo "Current production image: ${previous}"
+                    } catch (e) {
+                        echo 'No production container yet - first release'
+                    }
+                    try {
+                        bat 'docker rm -f simple-task-api-prod || exit 0'
+                        bat "docker run -d --name simple-task-api-prod -p 5000:5000 ${APP_NAME}:${BUILD_TAG}"
                         sleep 5
-                        bat "curl -f http://localhost:${PROD_PORT}/health || exit 1"
-                    } catch (Exception e) {
-                        echo "!!! CRITICAL: Prod failed! Rolling back..."
-                        bat "docker stop ${APP_NAME}-prod || exit 0"
-                        bat "docker rm ${APP_NAME}-prod || exit 0"
-                        bat "docker run -d --name ${APP_NAME}-prod -p ${PROD_PORT}:5000 ${APP_NAME}:backup"
-                        error("Deployment rolled back.")
+                        bat 'curl -f http://localhost:5000/health'
+                    } catch (e) {
+                        echo "!!! Release failed - rolling back to ${previous}"
+                        if (previous) {
+                            bat 'docker rm -f simple-task-api-prod || exit 0'
+                            bat "docker run -d --name simple-task-api-prod -p 5000:5000 ${previous}"
+                        }
+                        error 'Release failed - production rolled back'
                     }
                 }
             }
