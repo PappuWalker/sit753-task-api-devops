@@ -1,0 +1,24 @@
+{
+  "name": "simple-task-api",
+  "version": "1.0.0",
+  "description": "Task Manager REST API for DevOps CI/CD Pipeline",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "test": "jest",
+    "test:ci": "jest --ci --coverage --reporters=default --reporters=jest-junit"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "prom-client": "^15.1.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "jest-junit": "^16.0.0",
+    "supertest": "^6.3.4"
+  },
+  "jest-junit": {
+    "outputDirectory": "reports",
+    "outputName": "junit.xml"
+  }
+}
