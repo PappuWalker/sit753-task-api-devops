@@ -1,0 +1,7 @@
+node_modules
+coverage
+reports
+.git
+.scannerwork
+Dockerfile
+README.md
