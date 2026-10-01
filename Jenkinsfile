@@ -32,8 +32,10 @@ pipeline {
         }
         stage('3. Code Quality') {
             steps {
-                echo "===> [STAGE 3] Real SonarQube Static Analysis..."
-                bat "npx sonarqube-scanner -Dsonar.projectKey=task_api_project -Dsonar.sources=src -Dsonar.host.url=http://localhost:9000 -Dsonar.login=squ_a7c529d1d1eee118d0b0ca15f12bd1b086592981"
+                echo "===> [STAGE 3] Real SonarQube Static Analysis & Quality Gate..."
+                withCredentials([string(credentialsId: 'sonar-token-local', variable: 'SONAR_TOKEN')]) {
+                    bat 'npx sonarqube-scanner -Dsonar.host.url=http://localhost:9000 -Dsonar.login=%SONAR_TOKEN% -Dsonar.qualitygate.wait=true'
+                }
             }
         }
         stage('4. Security Scan') {
