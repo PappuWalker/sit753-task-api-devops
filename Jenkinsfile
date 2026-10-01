@@ -33,8 +33,7 @@ pipeline {
         stage('3. Code Quality') {
             steps {
                 echo "===> [STAGE 3] Real SonarQube Static Analysis..."
-                // Using npx to run the scanner directly against your local Docker SonarQube server
-                bat "npx sonarqube-scanner -Dsonar.projectKey=task_api_project -Dsonar.sources=src -Dsonar.host.url=http://localhost:9000 -Dsonar.token=squ_a7c529d1d1eee118d0b0ca15f12bd1b086592981"
+                bat "npx sonarqube-scanner -Dsonar.projectKey=task_api_project -Dsonar.sources=src -Dsonar.host.url=http://localhost:9000 -Dsonar.login=squ_a7c529d1d1eee118d0b0ca15f12bd1b086592981"
             }
         }
         stage('4. Security Scan') {
