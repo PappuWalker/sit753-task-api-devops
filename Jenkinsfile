@@ -15,7 +15,7 @@ pipeline {
         stage('1. Build') {
             steps {
                 echo "===> [STAGE 1] Building Node.js App & Docker Image..."
-                bat 'npm ci'
+                bat 'npm install'
                 bat "docker build -t ${APP_NAME}:${BUILD_TAG} -t ${APP_NAME}:latest ."
             }
         }
