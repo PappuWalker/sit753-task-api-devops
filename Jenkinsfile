@@ -92,4 +92,23 @@ pipeline {
             }
         }
     }
+
+    post {
+        failure {
+            withCredentials([string(credentialsId: 'discord-webhook', variable: 'HOOK')]) {
+                powershell '''
+                  $body = @{ content = "🚨 **ALERT:** Jenkins build $env:BUILD_NUMBER FAILED! 🚨 Check logs: $env:BUILD_URL" } | ConvertTo-Json -Depth 10
+                  Invoke-RestMethod -Uri $env:HOOK -Method Post -ContentType 'application/json' -Body $body
+                '''
+            }
+        }
+        success {
+            withCredentials([string(credentialsId: 'discord-webhook', variable: 'HOOK')]) {
+                powershell '''
+                  $body = @{ content = "✅ **SUCCESS:** Jenkins build $env:BUILD_NUMBER passed all 7 DevSecOps stages and is LIVE! 🚀" } | ConvertTo-Json -Depth 10
+                  Invoke-RestMethod -Uri $env:HOOK -Method Post -ContentType 'application/json' -Body $body
+                '''
+            }
+        }
+    }
 }
