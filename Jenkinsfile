@@ -3,69 +3,162 @@ pipeline {
     agent any
 
     options {
-        timeout(time: 20, unit: 'MINUTES')
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
     }
 
     environment {
         DOCKER_IMAGE = 'simple-task-api'
         SONAR_HOST_URL = 'http://localhost:9000'
+        SONAR_CREDENTIAL_ID = 'sonar-token-local'
+
+        STAGING_CONTAINER = 'simple-task-api-staging'
+        PRODUCTION_CONTAINER = 'simple-task-api-production'
+
+        STAGING_URL = 'http://localhost:5001/health'
+        PRODUCTION_URL = 'http://localhost:5000/health'
+        METRICS_URL = 'http://localhost:5000/metrics'
+        PROMETHEUS_URL = 'http://localhost:9090/-/healthy'
+
+        PREVIOUS_PRODUCTION_IMAGE = ''
     }
 
     stages {
 
+        /*
+         * ============================================================
+         * 1. BUILD
+         * ============================================================
+         */
+
         stage('1. Build') {
             steps {
-                echo 'Building the application and Docker image...'
+
+                echo '========================================'
+                echo 'STAGE 1 - BUILD'
+                echo '========================================'
 
                 bat 'npm install'
 
+                script {
+                    env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+                    env.FULL_IMAGE = "${env.DOCKER_IMAGE}:${env.IMAGE_TAG}"
+                }
+
+                echo "Building Docker image: ${env.FULL_IMAGE}"
+
                 bat """
                     docker build ^
-                    -t ${DOCKER_IMAGE}:${BUILD_NUMBER}-${GIT_COMMIT.substring(0, 7)} ^
+                    -t ${FULL_IMAGE} ^
                     -t ${DOCKER_IMAGE}:latest .
                 """
+
+                bat """
+                    docker image inspect ${FULL_IMAGE} >nul
+                    if errorlevel 1 (
+                        echo Docker image verification failed.
+                        exit /b 1
+                    )
+                """
+
+                echo "Docker image created successfully: ${env.FULL_IMAGE}"
             }
         }
 
-       stage('2. Automated Test') {
-    steps {
-        echo 'Running automated tests...'
 
-        bat 'npm run test:ci'
-    }
+        /*
+         * ============================================================
+         * 2. AUTOMATED TEST
+         * ============================================================
+         */
 
-    post {
-        always {
-            junit allowEmptyResults: true, testResults: 'junit.xml'
+        stage('2. Automated Test') {
+            steps {
+
+                echo '========================================'
+                echo 'STAGE 2 - AUTOMATED TEST'
+                echo '========================================'
+
+                /*
+                 * Explicitly tell jest-junit exactly where to create
+                 * the XML report.
+                 */
+                bat '''
+                    if exist junit.xml del /f /q junit.xml
+
+                    set "JEST_JUNIT_OUTPUT_FILE=%CD%\\junit.xml"
+
+                    npm run test:ci
+
+                    if not exist junit.xml (
+                        echo ERROR: junit.xml was not generated.
+                        exit /b 1
+                    )
+                '''
+            }
+
+            post {
+                always {
+                    junit(
+                        testResults: 'junit.xml',
+                        allowEmptyResults: false
+                    )
+                }
+            }
         }
-    }
-}
+
+
+        /*
+         * ============================================================
+         * 3. CODE QUALITY
+         * ============================================================
+         */
 
         stage('3. Code Quality') {
             steps {
-                echo 'Running SonarQube code quality analysis...'
+
+                echo '========================================'
+                echo 'STAGE 3 - CODE QUALITY'
+                echo '========================================'
 
                 withCredentials([
-    string(
-        credentialsId: 'sonar-token-local',
-        variable: 'SONAR_TOKEN'
-    )
-]) {
-    bat """
-        npx sonarqube-scanner ^
-        -Dsonar.host.url=${SONAR_HOST_URL} ^
-        -Dsonar.login=%SONAR_TOKEN% ^
-        -Dsonar.qualitygate.wait=true
-    """
-}
+                    string(
+                        credentialsId: "${SONAR_CREDENTIAL_ID}",
+                        variable: 'SONAR_TOKEN'
+                    )
+                ]) {
+
+                    bat """
+                        npx sonarqube-scanner ^
+                        -Dsonar.host.url=${SONAR_HOST_URL} ^
+                        -Dsonar.token=%SONAR_TOKEN% ^
+                        -Dsonar.qualitygate.wait=true
+                    """
+                }
+
+                echo 'SonarQube analysis and quality gate completed.'
             }
         }
 
+
+        /*
+         * ============================================================
+         * 4. SECURITY
+         * ============================================================
+         */
+
         stage('4. Security Scan') {
             steps {
-                echo 'Checking dependencies and Docker image for vulnerabilities...'
+
+                echo '========================================'
+                echo 'STAGE 4 - SECURITY'
+                echo '========================================'
+
+                echo 'Checking npm dependencies...'
 
                 bat 'npm audit --audit-level=high'
+
+                echo 'Running Trivy HIGH and CRITICAL scan...'
 
                 bat """
                     docker run --rm ^
@@ -74,8 +167,10 @@ pipeline {
                     image ^
                     --severity HIGH,CRITICAL ^
                     --format table ^
-                    ${DOCKER_IMAGE}:${BUILD_NUMBER}-${GIT_COMMIT.substring(0, 7)}
+                    ${FULL_IMAGE}
                 """
+
+                echo 'Blocking scan: CRITICAL vulnerabilities only...'
 
                 bat """
                     docker run --rm ^
@@ -85,140 +180,315 @@ pipeline {
                     --severity CRITICAL ^
                     --ignore-unfixed ^
                     --exit-code 1 ^
-                    ${DOCKER_IMAGE}:${BUILD_NUMBER}-${GIT_COMMIT.substring(0, 7)}
+                    ${FULL_IMAGE}
                 """
+
+                echo 'Security scan completed.'
             }
         }
+
+
+        /*
+         * ============================================================
+         * 5. DEPLOY TO STAGING
+         * ============================================================
+         */
 
         stage('5. Deploy to Staging') {
             steps {
-                echo 'Deploying the application to staging...'
 
-                bat 'docker rm -f simple-task-api-staging || exit 0'
+                echo '========================================'
+                echo 'STAGE 5 - STAGING DEPLOYMENT'
+                echo '========================================'
 
-                // Jenkins uses the standalone Docker Compose command.
-                bat 'docker-compose up -d staging'
+                echo "Deploying image: ${env.FULL_IMAGE}"
 
-                bat 'timeout /t 10 /nobreak'
-
+                /*
+                 * Remove old staging container.
+                 */
                 bat """
-                    powershell -Command "try {
-                        \$response = Invoke-WebRequest `
-                            -Uri http://localhost:5001/health `
-                            -UseBasicParsing
-
-                        if (\$response.StatusCode -ne 200) {
-                            exit 1
-                        }
-                    }
-                    catch {
-                        exit 1
-                    }"
+                    docker rm -f ${STAGING_CONTAINER} >nul 2>&1
+                    exit /b 0
                 """
 
-                echo 'Staging deployment completed successfully.'
+                /*
+                 * IMPORTANT:
+                 * docker-compose.yml expects IMAGE.
+                 * Supply it explicitly.
+                 */
+                bat """
+                    set "IMAGE=${FULL_IMAGE}" && ^
+                    docker-compose config
+                """
+
+                bat """
+                    set "IMAGE=${FULL_IMAGE}" && ^
+                    docker-compose up -d staging
+                """
+
+                echo 'Waiting for staging application...'
+
+                script {
+                    waitForHttp(env.STAGING_URL, 20, 3)
+                }
+
+                echo 'Staging deployment and health check passed.'
             }
         }
 
+
+        /*
+         * ============================================================
+         * 6. RELEASE TO PRODUCTION
+         * ============================================================
+         */
+
         stage('6. Release to Production') {
             steps {
-                echo 'Releasing the application to production...'
 
-                bat 'docker rm -f simple-task-api-production || exit 0'
+                echo '========================================'
+                echo 'STAGE 6 - PRODUCTION RELEASE'
+                echo '========================================'
 
-                bat 'docker-compose up -d production'
+                echo "Preparing production release: ${env.FULL_IMAGE}"
 
-                bat 'timeout /t 10 /nobreak'
+                /*
+                 * Check whether an existing production container exists.
+                 * If it does, save its image for rollback.
+                 */
+                script {
 
-                bat """
-                    powershell -Command "try {
-                        \$response = Invoke-WebRequest `
-                            -Uri http://localhost:5000/health `
-                            -UseBasicParsing
+                    def containerExists = bat(
+                        returnStatus: true,
+                        script: """
+                            docker inspect ${env.PRODUCTION_CONTAINER} >nul 2>&1
+                        """
+                    )
 
-                        if (\$response.StatusCode -ne 200) {
-                            exit 1
-                        }
+                    if (containerExists == 0) {
+
+                        env.PREVIOUS_PRODUCTION_IMAGE = bat(
+                            returnStdout: true,
+                            script: """
+                                docker inspect --format="{{.Config.Image}}" ${env.PRODUCTION_CONTAINER}
+                            """
+                        ).trim()
+
+                        echo "Previous production image: ${env.PREVIOUS_PRODUCTION_IMAGE}"
+
+                    } else {
+
+                        env.PREVIOUS_PRODUCTION_IMAGE = ''
+
+                        echo 'No previous production container found.'
                     }
-                    catch {
-                        exit 1
-                    }"
+                }
+
+                /*
+                 * Validate Compose before changing production.
+                 */
+                bat """
+                    set "IMAGE=${FULL_IMAGE}" && ^
+                    docker-compose config
                 """
+
+                /*
+                 * Remove old production container.
+                 */
+                bat """
+                    docker rm -f ${PRODUCTION_CONTAINER} >nul 2>&1
+                    exit /b 0
+                """
+
+                /*
+                 * Start new production version.
+                 */
+                bat """
+                    set "IMAGE=${FULL_IMAGE}" && ^
+                    docker-compose up -d production
+                """
+
+                echo 'Waiting for production health check...'
+
+                script {
+                    waitForHttp(env.PRODUCTION_URL, 20, 3)
+                }
 
                 echo 'Production release completed successfully.'
             }
 
             post {
+
                 failure {
-                    echo 'Production deployment failed. Attempting rollback...'
 
-                    bat 'docker rm -f simple-task-api-production || exit 0'
+                    echo '========================================'
+                    echo 'PRODUCTION DEPLOYMENT FAILED'
+                    echo 'ATTEMPTING ROLLBACK'
+                    echo '========================================'
 
-                    bat 'docker-compose up -d production || exit 0'
+                    script {
+
+                        if (env.PREVIOUS_PRODUCTION_IMAGE?.trim()) {
+
+                            echo "Rolling back to: ${env.PREVIOUS_PRODUCTION_IMAGE}"
+
+                            bat """
+                                docker rm -f ${PRODUCTION_CONTAINER} >nul 2>&1
+                                exit /b 0
+                            """
+
+                            bat """
+                                set "IMAGE=${PREVIOUS_PRODUCTION_IMAGE}" && ^
+                                docker-compose up -d production
+                            """
+
+                            echo 'Rollback command completed.'
+
+                        } else {
+
+                            echo 'No previous production image was available.'
+                            echo 'Automatic rollback could not be performed.'
+                        }
+                    }
                 }
             }
         }
 
+
+        /*
+         * ============================================================
+         * 7. MONITORING & ALERTING
+         * ============================================================
+         */
+
         stage('7. Monitoring & Alerting') {
             steps {
-                echo 'Starting monitoring and alerting...'
 
-                bat 'docker-compose up -d prometheus'
+                echo '========================================'
+                echo 'STAGE 7 - MONITORING & ALERTING'
+                echo '========================================'
 
-                bat 'timeout /t 10 /nobreak'
+                /*
+                 * Supply IMAGE because the Compose file performs
+                 * variable interpolation.
+                 */
+                bat """
+                    set "IMAGE=${FULL_IMAGE}" && ^
+                    docker-compose config
+                """
+
+                /*
+                 * Start Prometheus.
+                 */
+                bat """
+                    set "IMAGE=${FULL_IMAGE}" && ^
+                    docker-compose up -d prometheus
+                """
 
                 echo 'Checking Prometheus...'
 
-                bat """
-                    powershell -Command "try {
-                        \$response = Invoke-WebRequest `
-                            -Uri http://localhost:9090/-/healthy `
-                            -UseBasicParsing
+                script {
+                    waitForHttp(env.PROMETHEUS_URL, 20, 3)
+                }
 
-                        if (\$response.StatusCode -ne 200) {
-                            exit 1
-                        }
-                    }
-                    catch {
-                        exit 1
-                    }"
-                """
+                echo 'Checking application metrics endpoint...'
 
-                echo 'Checking application metrics...'
+                script {
+                    waitForHttp(env.METRICS_URL, 20, 3)
+                }
 
-                bat """
-                    powershell -Command "try {
-                        \$response = Invoke-WebRequest `
-                            -Uri http://localhost:5000/metrics `
-                            -UseBasicParsing
+                /*
+                 * Verify that Prometheus has loaded the alert rule.
+                 */
+                bat '''
+                    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+                    "$r=Invoke-RestMethod -Uri 'http://localhost:9090/api/v1/rules' -UseBasicParsing; ^
+                    if($r.status -ne 'success'){ ^
+                        Write-Error 'Prometheus rules API failed'; ^
+                        exit 1 ^
+                    }; ^
+                    $rule=$r.data.groups.rules | Where-Object {$_.name -eq 'TaskApiDown'}; ^
+                    if(-not $rule){ ^
+                        Write-Error 'TaskApiDown alert rule was not found'; ^
+                        exit 1 ^
+                    }; ^
+                    Write-Host 'TaskApiDown alert rule is loaded successfully.'"
+                '''
 
-                        if (\$response.StatusCode -ne 200) {
-                            exit 1
-                        }
-                    }
-                    catch {
-                        exit 1
-                    }"
-                """
-
-                echo 'Monitoring checks completed successfully.'
+                echo 'Prometheus monitoring and alert-rule verification completed.'
             }
         }
     }
 
+
+    /*
+     * ================================================================
+     * PIPELINE POST ACTIONS
+     * ================================================================
+     */
+
     post {
 
         success {
-            echo 'Pipeline completed successfully.'
-            echo 'All seven DevOps stages have completed.'
+
+            echo '========================================'
+            echo 'PIPELINE SUCCESS'
+            echo '========================================'
+            echo 'All seven DevOps stages completed successfully.'
+            echo "Released image: ${env.FULL_IMAGE}"
         }
 
         failure {
-            echo 'Pipeline failed. Please check the Jenkins console output.'
+
+            echo '========================================'
+            echo 'PIPELINE FAILED'
+            echo '========================================'
+            echo 'Check the failed stage and Jenkins console output.'
         }
 
         always {
-            echo 'Pipeline execution finished.'
+
+            echo '========================================'
+            echo 'PIPELINE FINISHED'
+            echo '========================================'
         }
+    }
+}
+
+
+/*
+ * ====================================================================
+ * HTTP HEALTH CHECK HELPER
+ * ====================================================================
+ */
+
+def waitForHttp(String url, int attempts = 20, int delaySeconds = 3) {
+
+    def command = """
+        powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "\\$url='${url}'; ^
+        for(\\$i=1; \\$i -le ${attempts}; \\$i++){ ^
+            try { ^
+                \\$response=Invoke-WebRequest -Uri \\$url -UseBasicParsing -TimeoutSec 5; ^
+                if(\\$response.StatusCode -eq 200){ ^
+                    Write-Host 'Health check passed:' \\$url; ^
+                    exit 0 ^
+                } ^
+            } catch { ^
+                Write-Host 'Attempt' \\$i 'failed. Retrying...' ^
+            }; ^
+            Start-Sleep -Seconds ${delaySeconds} ^
+        }; ^
+        Write-Error 'Health check failed:' \\$url; ^
+        exit 1"
+    """
+
+    def result = bat(
+        returnStatus: true,
+        script: command
+    )
+
+    if (result != 0) {
+        error("Health check failed for ${url}")
     }
 }
