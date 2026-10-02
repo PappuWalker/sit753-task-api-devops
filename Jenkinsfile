@@ -9,6 +9,7 @@ pipeline {
 
     environment {
         DOCKER_IMAGE = 'simple-task-api'
+
         SONAR_HOST_URL = 'http://localhost:9000'
         SONAR_CREDENTIAL_ID = 'sonar-token-local'
 
@@ -25,11 +26,9 @@ pipeline {
 
     stages {
 
-        /*
-         * ============================================================
-         * 1. BUILD
-         * ============================================================
-         */
+        // ============================================================
+        // 1. BUILD
+        // ============================================================
 
         stage('1. Build') {
             steps {
@@ -66,11 +65,9 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * 2. AUTOMATED TEST
-         * ============================================================
-         */
+        // ============================================================
+        // 2. AUTOMATED TEST
+        // ============================================================
 
         stage('2. Automated Test') {
             steps {
@@ -79,10 +76,6 @@ pipeline {
                 echo 'STAGE 2 - AUTOMATED TEST'
                 echo '========================================'
 
-                /*
-                 * Explicitly tell jest-junit exactly where to create
-                 * the XML report.
-                 */
                 bat '''
                     if exist junit.xml del /f /q junit.xml
 
@@ -108,11 +101,9 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * 3. CODE QUALITY
-         * ============================================================
-         */
+        // ============================================================
+        // 3. CODE QUALITY
+        // ============================================================
 
         stage('3. Code Quality') {
             steps {
@@ -131,7 +122,7 @@ pipeline {
                     bat """
                         npx sonarqube-scanner ^
                         -Dsonar.host.url=${SONAR_HOST_URL} ^
-                        -Dsonar.token=%SONAR_TOKEN% ^
+                        -Dsonar.login=%SONAR_TOKEN% ^
                         -Dsonar.qualitygate.wait=true
                     """
                 }
@@ -141,11 +132,9 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * 4. SECURITY
-         * ============================================================
-         */
+        // ============================================================
+        // 4. SECURITY SCAN
+        // ============================================================
 
         stage('4. Security Scan') {
             steps {
@@ -188,11 +177,9 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * 5. DEPLOY TO STAGING
-         * ============================================================
-         */
+        // ============================================================
+        // 5. DEPLOY TO STAGING
+        // ============================================================
 
         stage('5. Deploy to Staging') {
             steps {
@@ -204,7 +191,7 @@ pipeline {
                 echo "Deploying image: ${env.FULL_IMAGE}"
 
                 /*
-                 * Remove old staging container.
+                 * Remove previous staging container if it exists.
                  */
                 bat """
                     docker rm -f ${STAGING_CONTAINER} >nul 2>&1
@@ -212,15 +199,16 @@ pipeline {
                 """
 
                 /*
-                 * IMPORTANT:
-                 * docker-compose.yml expects IMAGE.
-                 * Supply it explicitly.
+                 * Validate Docker Compose with IMAGE supplied.
                  */
                 bat """
                     set "IMAGE=${FULL_IMAGE}" && ^
                     docker-compose config
                 """
 
+                /*
+                 * Deploy staging.
+                 */
                 bat """
                     set "IMAGE=${FULL_IMAGE}" && ^
                     docker-compose up -d staging
@@ -229,7 +217,11 @@ pipeline {
                 echo 'Waiting for staging application...'
 
                 script {
-                    waitForHttp(env.STAGING_URL, 20, 3)
+                    waitForHttp(
+                        env.STAGING_URL,
+                        20,
+                        3
+                    )
                 }
 
                 echo 'Staging deployment and health check passed.'
@@ -237,11 +229,9 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * 6. RELEASE TO PRODUCTION
-         * ============================================================
-         */
+        // ============================================================
+        // 6. RELEASE TO PRODUCTION
+        // ============================================================
 
         stage('6. Release to Production') {
             steps {
@@ -253,8 +243,8 @@ pipeline {
                 echo "Preparing production release: ${env.FULL_IMAGE}"
 
                 /*
-                 * Check whether an existing production container exists.
-                 * If it does, save its image for rollback.
+                 * Save the currently running production image.
+                 * This allows a real rollback if the new release fails.
                  */
                 script {
 
@@ -285,7 +275,7 @@ pipeline {
                 }
 
                 /*
-                 * Validate Compose before changing production.
+                 * Validate Compose before modifying production.
                  */
                 bat """
                     set "IMAGE=${FULL_IMAGE}" && ^
@@ -301,7 +291,7 @@ pipeline {
                 """
 
                 /*
-                 * Start new production version.
+                 * Deploy new production version.
                  */
                 bat """
                     set "IMAGE=${FULL_IMAGE}" && ^
@@ -311,7 +301,11 @@ pipeline {
                 echo 'Waiting for production health check...'
 
                 script {
-                    waitForHttp(env.PRODUCTION_URL, 20, 3)
+                    waitForHttp(
+                        env.PRODUCTION_URL,
+                        20,
+                        3
+                    )
                 }
 
                 echo 'Production release completed successfully.'
@@ -355,11 +349,9 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * 7. MONITORING & ALERTING
-         * ============================================================
-         */
+        // ============================================================
+        // 7. MONITORING & ALERTING
+        // ============================================================
 
         stage('7. Monitoring & Alerting') {
             steps {
@@ -369,8 +361,7 @@ pipeline {
                 echo '========================================'
 
                 /*
-                 * Supply IMAGE because the Compose file performs
-                 * variable interpolation.
+                 * Validate Compose configuration.
                  */
                 bat """
                     set "IMAGE=${FULL_IMAGE}" && ^
@@ -388,17 +379,26 @@ pipeline {
                 echo 'Checking Prometheus...'
 
                 script {
-                    waitForHttp(env.PROMETHEUS_URL, 20, 3)
+                    waitForHttp(
+                        env.PROMETHEUS_URL,
+                        20,
+                        3
+                    )
                 }
 
                 echo 'Checking application metrics endpoint...'
 
                 script {
-                    waitForHttp(env.METRICS_URL, 20, 3)
+                    waitForHttp(
+                        env.METRICS_URL,
+                        20,
+                        3
+                    )
                 }
 
                 /*
-                 * Verify that Prometheus has loaded the alert rule.
+                 * Verify that the TaskApiDown alert rule
+                 * is actually loaded into Prometheus.
                  */
                 bat '''
                     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -421,11 +421,9 @@ pipeline {
     }
 
 
-    /*
-     * ================================================================
-     * PIPELINE POST ACTIONS
-     * ================================================================
-     */
+    // ================================================================
+    // PIPELINE POST ACTIONS
+    // ================================================================
 
     post {
 
@@ -434,7 +432,9 @@ pipeline {
             echo '========================================'
             echo 'PIPELINE SUCCESS'
             echo '========================================'
+
             echo 'All seven DevOps stages completed successfully.'
+
             echo "Released image: ${env.FULL_IMAGE}"
         }
 
@@ -443,6 +443,7 @@ pipeline {
             echo '========================================'
             echo 'PIPELINE FAILED'
             echo '========================================'
+
             echo 'Check the failed stage and Jenkins console output.'
         }
 
@@ -456,11 +457,9 @@ pipeline {
 }
 
 
-/*
- * ====================================================================
- * HTTP HEALTH CHECK HELPER
- * ====================================================================
- */
+// ====================================================================
+// HTTP HEALTH CHECK HELPER
+// ====================================================================
 
 def waitForHttp(String url, int attempts = 20, int delaySeconds = 3) {
 
