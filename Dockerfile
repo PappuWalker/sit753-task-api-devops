@@ -1,4 +1,6 @@
 FROM node:20-alpine
+# Patch OpenSSL HIGH vulnerabilities reported by Trivy (CVE-2026-14456, CVE-2026-45447)
+RUN apk upgrade --no-cache libssl3 libcrypto3
 WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
