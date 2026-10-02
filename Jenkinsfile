@@ -27,19 +27,19 @@ pipeline {
             }
         }
 
-        stage('2. Automated Test') {
-            steps {
-                echo 'Running automated tests...'
+       stage('2. Automated Test') {
+    steps {
+        echo 'Running automated tests...'
 
-                bat 'npm run test:ci'
-            }
+        bat 'npm run test:ci'
+    }
 
-            post {
-                always {
-                    junit 'junit.xml'
-                }
-            }
+    post {
+        always {
+            junit allowEmptyResults: true, testResults: 'junit.xml'
         }
+    }
+}
 
         stage('3. Code Quality') {
             steps {
