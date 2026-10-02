@@ -1,150 +1,224 @@
 pipeline {
+
     agent any
-    environment {
-        APP_NAME        = 'simple-task-api'
-        BUILD_TAG       = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
-        STAGING_PORT    = '5001'
-        PROD_PORT       = '5000'
-        SONAR_PROJECT   = 'task_api_project'
-    }
+
     options {
         timeout(time: 20, unit: 'MINUTES')
-        disableConcurrentBuilds()
     }
+
+    environment {
+        DOCKER_IMAGE = 'simple-task-api'
+        SONAR_HOST_URL = 'http://localhost:9000'
+    }
+
     stages {
+
         stage('1. Build') {
             steps {
-                echo "===> [STAGE 1] Building Node.js App & Docker Image..."
+                echo 'Building the application and Docker image...'
+
                 bat 'npm install'
-                bat "docker build -t ${APP_NAME}:${BUILD_TAG} -t ${APP_NAME}:latest ."
+
+                bat """
+                    docker build ^
+                    -t ${DOCKER_IMAGE}:${BUILD_NUMBER}-${GIT_COMMIT.substring(0, 7)} ^
+                    -t ${DOCKER_IMAGE}:latest .
+                """
             }
         }
+
         stage('2. Automated Test') {
             steps {
-                echo "===> [STAGE 2] Running Jest Unit & Integration Tests..."
+                echo 'Running automated tests...'
+
                 bat 'npm run test:ci'
             }
+
             post {
                 always {
-                    junit testResults: 'reports/junit.xml', allowEmptyResults: true
+                    junit 'junit.xml'
                 }
             }
         }
+
         stage('3. Code Quality') {
             steps {
-                echo "===> [STAGE 3] Real SonarQube Static Analysis & Quality Gate..."
-                withCredentials([string(credentialsId: 'sonar-token-local', variable: 'SONAR_TOKEN')]) {
-                    bat 'npx sonarqube-scanner -Dsonar.host.url=http://localhost:9000 -Dsonar.login=%SONAR_TOKEN% -Dsonar.qualitygate.wait=true'
+                echo 'Running SonarQube code quality analysis...'
+
+                withCredentials([
+                    string(
+                        credentialsId: 'sonarqube-token',
+                        variable: 'SONAR_TOKEN'
+                    )
+                ]) {
+                    bat """
+                        npx sonarqube-scanner ^
+                        -Dsonar.host.url=${SONAR_HOST_URL} ^
+                        -Dsonar.login=%SONAR_TOKEN% ^
+                        -Dsonar.qualitygate.wait=true
+                    """
                 }
             }
         }
+
         stage('4. Security Scan') {
             steps {
-                echo "===> [STAGE 4] Trivy Container Vulnerability Scan & Audit..."
+                echo 'Checking dependencies and Docker image for vulnerabilities...'
+
                 bat 'npm audit --audit-level=high'
-                bat "docker run --rm -v //var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --severity HIGH,CRITICAL --format table ${APP_NAME}:${BUILD_TAG}"
-                bat "docker run --rm -v //var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --severity CRITICAL --ignore-unfixed --exit-code 1 ${APP_NAME}:${BUILD_TAG}"
+
+                bat """
+                    docker run --rm ^
+                    -v //var/run/docker.sock:/var/run/docker.sock ^
+                    aquasec/trivy:latest ^
+                    image ^
+                    --severity HIGH,CRITICAL ^
+                    --format table ^
+                    ${DOCKER_IMAGE}:${BUILD_NUMBER}-${GIT_COMMIT.substring(0, 7)}
+                """
+
+                bat """
+                    docker run --rm ^
+                    -v //var/run/docker.sock:/var/run/docker.sock ^
+                    aquasec/trivy:latest ^
+                    image ^
+                    --severity CRITICAL ^
+                    --ignore-unfixed ^
+                    --exit-code 1 ^
+                    ${DOCKER_IMAGE}:${BUILD_NUMBER}-${GIT_COMMIT.substring(0, 7)}
+                """
             }
         }
-        stage('Docker Environment Check') {
-    steps {
-        bat '''
-            echo ===== DOCKER LOCATION =====
-            where docker
 
-            echo ===== DOCKER COMPOSE LOCATION =====
-            where docker-compose
-
-            echo ===== DOCKER VERSION =====
-            docker --version
-
-            echo ===== DOCKER COMPOSE VERSION =====
-            docker compose version
-
-            echo ===== STANDALONE COMPOSE VERSION =====
-            docker-compose --version
-        '''
-    }
-}
         stage('5. Deploy to Staging') {
             steps {
-                echo "===> [STAGE 5] Deploying to Staging on Port 5001..."
+                echo 'Deploying the application to staging...'
+
                 bat 'docker rm -f simple-task-api-staging || exit 0'
-                withEnv(["IMAGE=${APP_NAME}:${BUILD_TAG}"]) {
-                    bat 'docker compose up -d staging'
-                }
-                sleep 5
-                bat "curl -f http://localhost:${STAGING_PORT}/health || exit 1"
+
+                // Jenkins uses the standalone Docker Compose command.
+                bat 'docker-compose up -d staging'
+
+                bat 'timeout /t 10 /nobreak'
+
+                bat """
+                    powershell -Command "try {
+                        \$response = Invoke-WebRequest `
+                            -Uri http://localhost:5001/health `
+                            -UseBasicParsing
+
+                        if (\$response.StatusCode -ne 200) {
+                            exit 1
+                        }
+                    }
+                    catch {
+                        exit 1
+                    }"
+                """
+
+                echo 'Staging deployment completed successfully.'
             }
         }
+
         stage('6. Release to Production') {
             steps {
-                echo "===> [STAGE 6] Promoting to Production on Port 5000 with Real Rollback..."
-                script {
-                    def previous = ''
-                    try {
-                        previous = bat(returnStdout: true, script: '@docker inspect --format "{{.Config.Image}}" simple-task-api-prod').trim()
-                        echo "Current production image: ${previous}"
-                    } catch (e) {
-                        echo 'No production container yet - first release'
-                    }
-                    try {
-                        bat 'docker rm -f simple-task-api-prod || exit 0'
-                        withEnv(["IMAGE=${APP_NAME}:${BUILD_TAG}"]) {
-                            bat 'docker compose up -d prod'
+                echo 'Releasing the application to production...'
+
+                bat 'docker rm -f simple-task-api-production || exit 0'
+
+                bat 'docker-compose up -d production'
+
+                bat 'timeout /t 10 /nobreak'
+
+                bat """
+                    powershell -Command "try {
+                        \$response = Invoke-WebRequest `
+                            -Uri http://localhost:5000/health `
+                            -UseBasicParsing
+
+                        if (\$response.StatusCode -ne 200) {
+                            exit 1
                         }
-                        sleep 5
-                        bat 'curl -f http://localhost:5000/health'
-                    } catch (e) {
-                        echo "!!! Release failed - rolling back to ${previous}"
-                        if (previous) {
-                            bat 'docker rm -f simple-task-api-prod || exit 0'
-                            withEnv(["IMAGE=${previous}"]) {
-                                bat 'docker compose up -d prod'
-                            }
-                        }
-                        error 'Release failed - production rolled back'
                     }
+                    catch {
+                        exit 1
+                    }"
+                """
+
+                echo 'Production release completed successfully.'
+            }
+
+            post {
+                failure {
+                    echo 'Production deployment failed. Attempting rollback...'
+
+                    bat 'docker rm -f simple-task-api-production || exit 0'
+
+                    bat 'docker-compose up -d production || exit 0'
                 }
             }
         }
+
         stage('7. Monitoring & Alerting') {
             steps {
-                echo "===> [STAGE 7] Prometheus monitoring + alert rules..."
-                bat 'docker rm -f prometheus || exit 0'
-                bat 'docker run -d --name prometheus -p 9090:9090 -v "%WORKSPACE%\\monitoring:/etc/prometheus" prom/prometheus:v2.53.2'
-                sleep 15
-                powershell '''
-                  $t = Invoke-RestMethod http://localhost:9090/api/v1/targets
-                  $prod = $t.data.activeTargets | Where-Object { $_.labels.job -eq 'task-api-prod' }
-                  if ($prod.health -ne 'up') { throw 'Prometheus reports production DOWN' }
-                  Write-Host 'Prometheus is scraping production: UP'
-                  $r = Invoke-RestMethod http://localhost:9090/api/v1/rules
-                  Write-Host ('Alert rules loaded: ' + (($r.data.groups | ForEach-Object { $_.rules.name }) -join ', '))
-                '''
-                bat "curl -s http://localhost:${PROD_PORT}/metrics > metrics.txt"
-                bat "findstr http_requests_total metrics.txt || exit 1"
-                echo "TELEMETRY: Pipeline Build #${BUILD_NUMBER} successful. App is live."
+                echo 'Starting monitoring and alerting...'
+
+                bat 'docker-compose up -d prometheus'
+
+                bat 'timeout /t 10 /nobreak'
+
+                echo 'Checking Prometheus...'
+
+                bat """
+                    powershell -Command "try {
+                        \$response = Invoke-WebRequest `
+                            -Uri http://localhost:9090/-/healthy `
+                            -UseBasicParsing
+
+                        if (\$response.StatusCode -ne 200) {
+                            exit 1
+                        }
+                    }
+                    catch {
+                        exit 1
+                    }"
+                """
+
+                echo 'Checking application metrics...'
+
+                bat """
+                    powershell -Command "try {
+                        \$response = Invoke-WebRequest `
+                            -Uri http://localhost:5000/metrics `
+                            -UseBasicParsing
+
+                        if (\$response.StatusCode -ne 200) {
+                            exit 1
+                        }
+                    }
+                    catch {
+                        exit 1
+                    }"
+                """
+
+                echo 'Monitoring checks completed successfully.'
             }
         }
     }
 
     post {
-        failure {
-            withCredentials([string(credentialsId: 'discord-webhook', variable: 'HOOK')]) {
-                powershell '''
-                  $body = @{ content = "🚨 **ALERT:** Jenkins build $env:BUILD_NUMBER FAILED! 🚨 Check logs: $env:BUILD_URL" } | ConvertTo-Json -Depth 10
-                  Invoke-RestMethod -Uri $env:HOOK -Method Post -ContentType 'application/json' -Body $body
-                '''
-            }
-        }
+
         success {
-            withCredentials([string(credentialsId: 'discord-webhook', variable: 'HOOK')]) {
-                powershell '''
-                  $body = @{ content = "✅ **SUCCESS:** Jenkins build $env:BUILD_NUMBER passed all 7 DevSecOps stages and is LIVE! 🚀" } | ConvertTo-Json -Depth 10
-                  Invoke-RestMethod -Uri $env:HOOK -Method Post -ContentType 'application/json' -Body $body
-                '''
-            }
+            echo 'Pipeline completed successfully.'
+            echo 'All seven DevOps stages have completed.'
+        }
+
+        failure {
+            echo 'Pipeline failed. Please check the Jenkins console output.'
+        }
+
+        always {
+            echo 'Pipeline execution finished.'
         }
     }
 }
