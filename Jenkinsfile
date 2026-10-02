@@ -74,7 +74,7 @@ pipeline {
                             bat 'docker-compose up -d prod'
                         }
                         sleep 5
-                        bat 'curl -f http://localhost:5000/health'
+                        bat 'curl -f http://localhost:5000/healthz'
                     } catch (e) {
                         echo "!!! Release failed - rolling back to ${previous}"
                         if (previous) {
