@@ -46,18 +46,18 @@ pipeline {
                 echo 'Running SonarQube code quality analysis...'
 
                 withCredentials([
-                    string(
-                        credentialsId: 'sonarqube-token',
-                        variable: 'SONAR_TOKEN'
-                    )
-                ]) {
-                    bat """
-                        npx sonarqube-scanner ^
-                        -Dsonar.host.url=${SONAR_HOST_URL} ^
-                        -Dsonar.login=%SONAR_TOKEN% ^
-                        -Dsonar.qualitygate.wait=true
-                    """
-                }
+    string(
+        credentialsId: 'sonar-token-local',
+        variable: 'SONAR_TOKEN'
+    )
+]) {
+    bat """
+        npx sonarqube-scanner ^
+        -Dsonar.host.url=${SONAR_HOST_URL} ^
+        -Dsonar.login=%SONAR_TOKEN% ^
+        -Dsonar.qualitygate.wait=true
+    """
+}
             }
         }
 
