@@ -1,5 +1,6 @@
 const express = require('express');
 const client = require('prom-client');
+const { isValidTitle } = require('./validation');
 
 const app = express();
 app.use(express.json());
@@ -40,7 +41,7 @@ app.get('/metrics', async (req, res) => {
 app.get('/api/tasks', (req, res) => res.status(200).json(tasks));
 
 app.post('/api/tasks', (req, res) => {
-  if (!req.body.title) return res.status(400).json({ error: 'Title is required' });
+  if (!isValidTitle(req.body.title)) return res.status(400).json({ error: 'Title is required' });
   const newTask = { id: tasks.length + 1, title: req.body.title, completed: false };
   tasks.push(newTask);
   res.status(201).json(newTask);

@@ -1,0 +1,11 @@
+groups:
+  - name: task-api
+    rules:
+      - alert: TaskApiDown
+        expr: up{job="task-api-prod"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Production Task API is down"
+          description: "Prometheus could not reach the production API for more than 30 seconds."

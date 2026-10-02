@@ -1,0 +1,16 @@
+# Staging and production environments. IMAGE is set by Jenkins for each deploy.
+services:
+  staging:
+    image: ${IMAGE}
+    container_name: simple-task-api-staging
+    ports:
+      - "5001:5000"
+    environment:
+      APP_ENV: staging
+  prod:
+    image: ${IMAGE}
+    container_name: simple-task-api-prod
+    ports:
+      - "5000:5000"
+    environment:
+      APP_ENV: production

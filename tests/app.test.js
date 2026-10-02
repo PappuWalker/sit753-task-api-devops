@@ -31,4 +31,16 @@ describe('Task Manager API Tests', () => {
     expect(res.statusCode).toEqual(400);
     expect(res.body).toHaveProperty('error');
   });
+
+  it('POST /api/tasks rejects a title of only spaces', async () => {
+    const res = await request(app).post('/api/tasks').send({ title: '   ' });
+    expect(res.statusCode).toEqual(400);
+  });
+
+  it('a created task appears in GET /api/tasks', async () => {
+    await request(app).post('/api/tasks').send({ title: 'Check pipeline logs' });
+    const res = await request(app).get('/api/tasks');
+    const titles = res.body.map((t) => t.title);
+    expect(titles).toContain('Check pipeline logs');
+  });
 });

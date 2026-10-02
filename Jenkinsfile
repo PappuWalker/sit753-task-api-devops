@@ -41,17 +41,18 @@ pipeline {
         stage('4. Security Scan') {
             steps {
                 echo "===> [STAGE 4] Trivy Container Vulnerability Scan & Audit..."
-                bat 'npm audit --audit-level=high || exit 0'
+                bat 'npm audit --audit-level=high'
                 bat "docker run --rm -v //var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --severity HIGH,CRITICAL --format table ${APP_NAME}:${BUILD_TAG}"
-                bat "docker run --rm -v //var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --severity CRITICAL --ignore-unfixed --skip-files /usr/local/lib/node_modules/npm/node_modules/tar/package.json --exit-code 1 ${APP_NAME}:${BUILD_TAG}"
+                bat "docker run --rm -v //var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --severity CRITICAL --ignore-unfixed --exit-code 1 ${APP_NAME}:${BUILD_TAG}"
             }
         }
         stage('5. Deploy to Staging') {
             steps {
                 echo "===> [STAGE 5] Deploying to Staging on Port 5001..."
-                bat "docker stop ${APP_NAME}-staging || exit 0"
-                bat "docker rm ${APP_NAME}-staging || exit 0"
-                bat "docker run -d --name ${APP_NAME}-staging -p ${STAGING_PORT}:5000 ${APP_NAME}:${BUILD_TAG}"
+                bat 'docker rm -f simple-task-api-staging || exit 0'
+                withEnv(["IMAGE=${APP_NAME}:${BUILD_TAG}"]) {
+                    bat 'docker compose up -d staging'
+                }
                 sleep 5
                 bat "curl -f http://localhost:${STAGING_PORT}/health || exit 1"
             }
@@ -69,14 +70,18 @@ pipeline {
                     }
                     try {
                         bat 'docker rm -f simple-task-api-prod || exit 0'
-                        bat "docker run -d --name simple-task-api-prod -p 5000:5000 ${APP_NAME}:${BUILD_TAG}"
+                        withEnv(["IMAGE=${APP_NAME}:${BUILD_TAG}"]) {
+                            bat 'docker compose up -d prod'
+                        }
                         sleep 5
                         bat 'curl -f http://localhost:5000/health'
                     } catch (e) {
                         echo "!!! Release failed - rolling back to ${previous}"
                         if (previous) {
                             bat 'docker rm -f simple-task-api-prod || exit 0'
-                            bat "docker run -d --name simple-task-api-prod -p 5000:5000 ${previous}"
+                            withEnv(["IMAGE=${previous}"]) {
+                                bat 'docker compose up -d prod'
+                            }
                         }
                         error 'Release failed - production rolled back'
                     }
@@ -85,7 +90,18 @@ pipeline {
         }
         stage('7. Monitoring & Alerting') {
             steps {
-                echo "===> [STAGE 7] Checking Prometheus Metrics..."
+                echo "===> [STAGE 7] Prometheus monitoring + alert rules..."
+                bat 'docker rm -f prometheus || exit 0'
+                bat 'docker run -d --name prometheus -p 9090:9090 -v "%WORKSPACE%\\monitoring:/etc/prometheus" prom/prometheus:v2.53.2'
+                sleep 15
+                powershell '''
+                  $t = Invoke-RestMethod http://localhost:9090/api/v1/targets
+                  $prod = $t.data.activeTargets | Where-Object { $_.labels.job -eq 'task-api-prod' }
+                  if ($prod.health -ne 'up') { throw 'Prometheus reports production DOWN' }
+                  Write-Host 'Prometheus is scraping production: UP'
+                  $r = Invoke-RestMethod http://localhost:9090/api/v1/rules
+                  Write-Host ('Alert rules loaded: ' + (($r.data.groups | ForEach-Object { $_.rules.name }) -join ', '))
+                '''
                 bat "curl -s http://localhost:${PROD_PORT}/metrics > metrics.txt"
                 bat "findstr http_requests_total metrics.txt || exit 1"
                 echo "TELEMETRY: Pipeline Build #${BUILD_NUMBER} successful. App is live."
