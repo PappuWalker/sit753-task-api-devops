@@ -46,6 +46,26 @@ pipeline {
                 bat "docker run --rm -v //var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --severity CRITICAL --ignore-unfixed --exit-code 1 ${APP_NAME}:${BUILD_TAG}"
             }
         }
+        stage('Docker Environment Check') {
+    steps {
+        bat '''
+            echo ===== DOCKER LOCATION =====
+            where docker
+
+            echo ===== DOCKER COMPOSE LOCATION =====
+            where docker-compose
+
+            echo ===== DOCKER VERSION =====
+            docker --version
+
+            echo ===== DOCKER COMPOSE VERSION =====
+            docker compose version
+
+            echo ===== STANDALONE COMPOSE VERSION =====
+            docker-compose --version
+        '''
+    }
+}
         stage('5. Deploy to Staging') {
             steps {
                 echo "===> [STAGE 5] Deploying to Staging on Port 5001..."
